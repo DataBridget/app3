@@ -34,7 +34,7 @@ if 'chart_images' not in st.session_state:  # 新增：存储图表图片字节�
 # 获取当前脚本所在目录
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 数据文件夹（相对于脚本所在目录）
-DATA_DIR = os.path.join(BASE_DIR, "年报下载", "总和")
+DATA_DIR = os.path.join(BASE_DIR, "年报下载")
 # 词频数据文件（相对路径）
 WORDFREQ_FILE = os.path.join(DATA_DIR, "词频数据.xlsx")
 # 行业数据文件（相对路径）
@@ -543,4 +543,5 @@ with st.sidebar:
 
 # -------------------------- 页脚 --------------------------
 st.divider()
+
 st.markdown(f"© {datetime.now().year} 企业数字化转型分析平台 | 词频+行业趋势分析版（相对路径版）")
