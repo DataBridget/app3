@@ -1,5 +1,6 @@
-# requirements.txt 完整内容
 streamlit
 pandas
-openpyxl  # 读取xlsx文件必备
-plotly    # 新增：解决plotly.express导入报错
+numpy
+plotly
+python-docx
+openpyxl
