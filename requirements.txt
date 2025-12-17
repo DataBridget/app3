@@ -3,4 +3,4 @@ pandas
 numpy
 plotly
 openpyxl
-# 彻底移除kaleido、matplotlib、python-docx（无图片/报告导出）
+python-docx  # 仅用于生成Word报告
