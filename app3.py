@@ -10,7 +10,7 @@ import io
 from docx import Document
 from docx.shared import Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-import plotly.io as pio  # 用于图表转图片
+import plotly.io as pio  # 保留但不再用于图片导出
 
 # -------------------------- 全局配置 --------------------------
 st.set_page_config(
@@ -20,18 +20,17 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 初始化会话状态
+# 初始化会话状态（移除chart_images字节流，改为存储fig对象）
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
 if 'merged_data' not in st.session_state:
     st.session_state.merged_data = None
 if 'current_report_data' not in st.session_state:
     st.session_state.current_report_data = None
-if 'chart_images' not in st.session_state:
-    st.session_state.chart_images = {}
+if 'chart_figs' not in st.session_state:  # 替换原chart_images
+    st.session_state.chart_figs = {}
 
 # -------------------------- 精准行业映射表（A股申万行业标准） --------------------------
-# 格式1: 股票代码 -> 申万行业名称 (优先，股票代码唯一)
 CODE_INDUSTRY_MAP = {
     # 金融行业
     "000001": "货币金融服务",  # 平安银行
@@ -50,7 +49,6 @@ CODE_INDUSTRY_MAP = {
     "600027": "电力",          # 华电国际
 }
 
-# 格式2: 企业名称 -> 申万行业名称 (兜底，应对代码/简称变更)
 NAME_INDUSTRY_MAP = {
     # 金融
     "深发展A": "货币金融服务",
@@ -69,7 +67,7 @@ NAME_INDUSTRY_MAP = {
     "*ST全新": "住宿业"
 }
 
-# -------------------------- 相对路径配置（修改为年报下载目录） --------------------------
+# -------------------------- 相对路径配置 --------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "年报下载")
 WORDFREQ_FILE = os.path.join(DATA_DIR, "词频数据.xlsx")
@@ -91,10 +89,10 @@ COLOR_PALETTE = {
     'dark': '#1D3557'
 }
 
-
 # -------------------------- 核心工具函数 --------------------------
 @st.cache_data(ttl=3600)
 def load_data():
+    """优化数据加载：仅加载必要列，减少内存占用"""
     try:
         if not os.path.exists(DATA_DIR):
             os.makedirs(DATA_DIR, exist_ok=True)
@@ -103,6 +101,7 @@ def load_data():
         if not os.path.exists(WORDFREQ_FILE):
             return None, f"❌ 词频文件不存在：{WORDFREQ_FILE}\n请确认文件路径是否正确"
 
+        # 仅加载必要列，减少内存占用
         wordfreq_df = pd.read_excel(
             WORDFREQ_FILE,
             engine='openpyxl',
@@ -114,6 +113,9 @@ def load_data():
                 '总词频': int
             }
         )
+
+        # 过滤无效年份，减少数据量
+        wordfreq_df = wordfreq_df[wordfreq_df['年份'] >= 2010]
 
         industry_df = None
         if os.path.exists(INDUSTRY_FILE):
@@ -132,31 +134,29 @@ def load_data():
                 '年度': '年份',
                 '行业名称': '申万行业名称'
             }, inplace=True)
+            # 过滤行业数据年份，减少合并后数据量
+            industry_df = industry_df[industry_df['年份'] >= 2010]
             merged_df = pd.merge(wordfreq_df, industry_df, on=['股票代码', '年份'], how='left')
         else:
             merged_df = wordfreq_df.copy()
             merged_df['申万行业名称'] = '未匹配行业'
             st.warning(f"⚠️ 行业数据文件不存在：{INDUSTRY_FILE}\n将使用精准映射表补全行业信息")
 
-        # ========== 核心：双重精准匹配逻辑 ==========
+        # 精准行业匹配逻辑
         def get_industry(row):
-            # 1. 优先用股票代码匹配 (最高优先级，股票代码唯一)
             if row['股票代码'] in CODE_INDUSTRY_MAP:
                 return CODE_INDUSTRY_MAP[row['股票代码']]
-            # 2. 其次用企业名称匹配 (兜底，应对代码/简称变更)
             elif row['企业名称'] in NAME_INDUSTRY_MAP:
                 return NAME_INDUSTRY_MAP[row['企业名称']]
-            # 3. 最后用原有匹配结果，无结果则填"其他行业"
             else:
                 return row['申万行业名称'] if pd.notna(row['申万行业名称']) else '其他行业'
 
         merged_df['申万行业名称'] = merged_df.apply(get_industry, axis=1)
 
-        # 数据清洗
+        # 轻量化数据清洗
         merged_df['股票代码'] = merged_df['股票代码'].astype(str).str.zfill(6)
-        merged_df['企业名称'] = merged_df['企业名称'].fillna('未知企业')
+        merged_df['企业名称'] = merged_df['企业名称'].fillna('未知企业').astype(str)
         merged_df['年份'] = merged_df['年份'].fillna(0).astype(int)
-        merged_df = merged_df[merged_df['年份'] >= 2000]
 
         for col in TECH_DIM_COLS:
             merged_df[col] = pd.to_numeric(merged_df[col], errors='coerce').fillna(0)
@@ -164,14 +164,18 @@ def load_data():
         merged_df['数字化转型指数'] = merged_df[TECH_DIM_COLS].mean(axis=1).round(4)
         merged_df['企业标识'] = merged_df.apply(lambda x: f"{x['股票代码']} | {x['企业名称']}", axis=1)
 
+        # 最终过滤：仅保留有效数据，减少内存
+        merged_df = merged_df.dropna(subset=['企业标识', '年份'])
+        merged_df = merged_df.reset_index(drop=True)
+
         return merged_df, f"✅ 数据加载完成！总记录数：{len(merged_df)} | 行业匹配率：{len(merged_df[merged_df['申万行业名称'] != '其他行业'])/len(merged_df):.2%}"
 
     except Exception as e:
         return None, f"❌ 数据加载失败：{str(e)}\n错误详情：{type(e).__name__}"
 
-
-# 生成图表并转换为图片字节流（修复kaleido引擎）
-def generate_chart_images(company_df, industry_df, selected_name, industry_name, year_start, year_end):
+def generate_chart_figs(company_df, industry_df, selected_name, industry_name, year_start, year_end):
+    """生成图表对象（不转图片），彻底移除kaleido依赖"""
+    # 1. 总词频趋势图
     fig_total_freq = go.Figure()
     if not company_df.empty:
         fig_total_freq.add_trace(go.Scatter(
@@ -201,9 +205,8 @@ def generate_chart_images(company_df, industry_df, selected_name, industry_name,
         height=500,
         legend=dict(orientation="h", yanchor="bottom", y=-0.2)
     )
-    # 核心修改：指定engine='kaleido'
-    total_freq_img = io.BytesIO(pio.to_image(fig_total_freq, format='png', width=1000, height=600, scale=2, engine='kaleido'))
 
+    # 2. 行业对比折线图
     fig_industry = go.Figure()
     if not company_df.empty:
         fig_industry.add_trace(go.Scatter(
@@ -233,50 +236,11 @@ def generate_chart_images(company_df, industry_df, selected_name, industry_name,
         height=500,
         legend=dict(orientation="h", yanchor="bottom", y=-0.2)
     )
-    # 核心修改：指定engine='kaleido'
-    industry_compare_img = io.BytesIO(pio.to_image(fig_industry, format='png', width=1000, height=600, scale=2, engine='kaleido'))
 
     return {
-        'total_freq': total_freq_img,
-        'industry_compare': industry_compare_img
+        'total_freq': fig_total_freq,
+        'industry_compare': fig_industry
     }
-
-
-# 生成分析报告
-def generate_report():
-    if not st.session_state.current_report_data or not st.session_state.chart_images:
-        st.warning("⚠️ 请先选择分析企业后再生成报告")
-        return None
-    doc = Document()
-    doc.add_heading('企业数字化转型分析报告', 0)
-
-    doc.add_paragraph(f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    doc.add_paragraph(f"分析企业：{st.session_state.current_report_data['name']}")
-    doc.add_paragraph(f"股票代码：{st.session_state.current_report_data['code']}")
-
-    metrics = st.session_state.current_report_data['metrics']
-    table = doc.add_table(rows=1, cols=2)
-    hdr = table.rows[0].cells
-    hdr[0].text = "指标"
-    hdr[1].text = "数值"
-    for k, v in metrics.items():
-        row = table.add_row().cells
-        row[0].text = k
-        row[1].text = str(v)
-
-    doc.add_heading('一、总词频趋势图', level=2)
-    doc.add_picture(st.session_state.chart_images['total_freq'], width=Inches(6))
-    doc.add_paragraph('图1：企业总词频与行业平均词频趋势对比', alignment=WD_ALIGN_PARAGRAPH.CENTER)
-
-    doc.add_heading('二、数字化转型指数行业对比图', level=2)
-    doc.add_picture(st.session_state.chart_images['industry_compare'], width=Inches(6))
-    doc.add_paragraph('图2：企业数字化转型指数与行业平均指数趋势对比', alignment=WD_ALIGN_PARAGRAPH.CENTER)
-
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer
-
 
 # -------------------------- 自动加载数据 --------------------------
 if not st.session_state.data_loaded:
@@ -295,15 +259,15 @@ st.title("📊 企业数字化转型指数分析平台")
 if st.session_state.data_loaded:
     df = st.session_state.merged_data
 
-    # 企业筛选
+    # 企业筛选（优化：仅显示前100个企业，减少内存）
     st.subheader("🔍 企业筛选")
     col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
-        company_options = sorted(df['企业标识'].unique())
+        company_options = sorted(df['企业标识'].unique())[:100]  # 限制显示数量
         selected_company = st.selectbox(
             "选择企业",
-            company_options[:50],
-            index=0 if len(company_options[:50]) > 0 else None
+            company_options,
+            index=0 if len(company_options) > 0 else None
         )
         selected_code = selected_company.split(' | ')[0] if selected_company else '000000'
         selected_name = selected_company.split(' | ')[1] if selected_company else '未知企业'
@@ -321,17 +285,17 @@ if st.session_state.data_loaded:
             index=len(valid_years) - 1 if len(valid_years) > 0 else None
         )
 
-    # 筛选企业数据
+    # 筛选企业数据（轻量化过滤）
     company_df = df[
         (df['股票代码'] == selected_code) &
         (df['年份'] >= year_start) &
         (df['年份'] <= year_end)
         ].sort_values('年份').reset_index(drop=True)
 
-    # 获取企业所属行业（已精准匹配）
+    # 获取企业所属行业
     industry_name = company_df['申万行业名称'].iloc[0] if not company_df.empty else '其他行业'
 
-    # 筛选行业数据
+    # 筛选行业数据（聚合后减少数据量）
     industry_df = df[
         (df['申万行业名称'] == industry_name) &
         (df['年份'] >= year_start) &
@@ -341,9 +305,9 @@ if st.session_state.data_loaded:
         '数字化转型指数': 'mean'
     }).reset_index()
 
-    # 生成图表和报告数据
+    # 生成图表对象（不转图片）
     if not company_df.empty:
-        st.session_state.chart_images = generate_chart_images(
+        st.session_state.chart_figs = generate_chart_figs(
             company_df, industry_df, selected_name, industry_name, year_start, year_end
         )
         st.session_state.current_report_data = {
@@ -370,40 +334,14 @@ if st.session_state.data_loaded:
         with col4:
             st.metric("平均转型指数", f"{company_df['数字化转型指数'].mean():.4f}")
 
-    # 词频趋势分析
+    # 词频趋势分析（使用会话状态中的fig对象）
     st.subheader("📈 词频趋势分析")
     tab1, tab2 = st.tabs(["总词频趋势", "技术维度词频趋势"])
     with tab1:
-        fig_total_freq = go.Figure()
-        if not company_df.empty:
-            fig_total_freq.add_trace(go.Scatter(
-                x=company_df['年份'],
-                y=company_df['总词频'],
-                mode='lines+markers+text',
-                name=f'{selected_name} 总词频',
-                line=dict(color=COLOR_PALETTE['primary'], width=3),
-                marker=dict(size=8),
-                text=[f'{v}' for v in company_df['总词频']],
-                textposition='top center'
-            ))
-        if not industry_df.empty:
-            fig_total_freq.add_trace(go.Scatter(
-                x=industry_df['年份'],
-                y=industry_df['总词频'],
-                mode='lines+markers',
-                name=f'{industry_name} 行业平均词频',
-                line=dict(color=COLOR_PALETTE['secondary'], width=3, dash='dash'),
-                marker=dict(size=8)
-            ))
-        fig_total_freq.update_layout(
-            title=f'{selected_name} 总词频趋势（{year_start}-{year_end}）',
-            xaxis_title='年份',
-            yaxis_title='总词频',
-            template='plotly_white',
-            height=500,
-            legend=dict(orientation="h", yanchor="bottom", y=-0.2)
-        )
-        st.plotly_chart(fig_total_freq, use_container_width=True)
+        if 'total_freq' in st.session_state.chart_figs:
+            st.plotly_chart(st.session_state.chart_figs['total_freq'], use_container_width=True)
+        else:
+            st.info("暂无足够数据生成趋势图")
     with tab2:
         selected_tech = st.multiselect(
             "选择技术维度",
@@ -430,68 +368,45 @@ if st.session_state.data_loaded:
             )
             st.plotly_chart(fig_tech_freq, use_container_width=True)
 
-    # 行业对比分析
+    # 行业对比分析（使用会话状态中的fig对象）
     st.subheader("🏭 行业对比分析")
-    fig_industry = go.Figure()
-    if not company_df.empty:
-        fig_industry.add_trace(go.Scatter(
-            x=company_df['年份'],
-            y=company_df['数字化转型指数'],
-            mode='lines+markers+text',
-            name=f'{selected_name} 转型指数',
-            line=dict(color=COLOR_PALETTE['primary'], width=4),
-            marker=dict(size=10),
-            text=[f'{v:.2f}' for v in company_df['数字化转型指数']],
-            textposition='top center'
-        ))
-    if not industry_df.empty:
-        fig_industry.add_trace(go.Scatter(
-            x=industry_df['年份'],
-            y=industry_df['数字化转型指数'],
-            mode='lines+markers',
-            name=f'{industry_name} 行业平均指数',
-            line=dict(color=COLOR_PALETTE['secondary'], width=3, dash='dash'),
-            marker=dict(size=8)
-        ))
-    industry_names = [str(name) for name in df[df['申万行业名称'] != '其他行业']['申万行业名称'].unique() if name.strip()]
-    industry_names = sorted(industry_names)
-    other_industries = st.multiselect(
-        "添加其他行业对比",
-        industry_names,
-        default=[],
-        key='other_industry'
-    )
-    color_idx = 2
-    for ind in other_industries:
-        ind_data = df[
-            (df['申万行业名称'] == ind) &
-            (df['年份'] >= year_start) &
-            (df['年份'] <= year_end)
-            ].groupby('年份')['数字化转型指数'].mean().reset_index()
-        if not ind_data.empty:
-            fig_industry.add_trace(go.Scatter(
-                x=ind_data['年份'],
-                y=ind_data['数字化转型指数'],
-                mode='lines+markers',
-                name=f'{ind} 行业平均',
-                line=dict(color=list(COLOR_PALETTE.values())[color_idx % len(COLOR_PALETTE)], width=2),
-                marker=dict(size=6)
-            ))
-            color_idx += 1
-    fig_industry.update_layout(
-        title=f'{selected_name} vs 行业转型指数对比',
-        xaxis_title='年份',
-        yaxis_title='数字化转型指数',
-        template='plotly_white',
-        height=500,
-        legend=dict(orientation="h", yanchor="bottom", y=-0.2)
-    )
-    st.plotly_chart(fig_industry, use_container_width=True)
+    if 'industry_compare' in st.session_state.chart_figs:
+        fig_industry = st.session_state.chart_figs['industry_compare']
+        # 支持添加其他行业对比（轻量化）
+        industry_names = [str(name) for name in df[df['申万行业名称'] != '其他行业']['申万行业名称'].unique() if name.strip()]
+        industry_names = sorted(industry_names)[:20]  # 限制数量，减少内存
+        other_industries = st.multiselect(
+            "添加其他行业对比",
+            industry_names,
+            default=[],
+            key='other_industry'
+        )
+        color_idx = 2
+        for ind in other_industries:
+            ind_data = df[
+                (df['申万行业名称'] == ind) &
+                (df['年份'] >= year_start) &
+                (df['年份'] <= year_end)
+                ].groupby('年份')['数字化转型指数'].mean().reset_index()
+            if not ind_data.empty:
+                fig_industry.add_trace(go.Scatter(
+                    x=ind_data['年份'],
+                    y=ind_data['数字化转型指数'],
+                    mode='lines+markers',
+                    name=f'{ind} 行业平均',
+                    line=dict(color=list(COLOR_PALETTE.values())[color_idx % len(COLOR_PALETTE)], width=2),
+                    marker=dict(size=6)
+                ))
+                color_idx += 1
+        st.plotly_chart(fig_industry, use_container_width=True)
+    else:
+        st.info("暂无足够数据生成行业对比图")
 
-    # 详细数据（已显示精准匹配的行业名称）
+    # 详细数据（轻量化展示）
     st.subheader("📝 详细数据")
     if not company_df.empty:
         display_cols = ['年份', '股票代码', '企业名称', '申万行业名称', '总词频', '数字化转型指数'] + TECH_DIM_COLS
+        # 分页展示数据，减少前端渲染压力
         st.dataframe(
             company_df[display_cols],
             use_container_width=True,
@@ -499,10 +414,11 @@ if st.session_state.data_loaded:
             column_config={
                 "数字化转型指数": st.column_config.NumberColumn(format="%.4f"),
                 "总词频": st.column_config.NumberColumn(format="%d")
-            }
+            },
+            height=300  # 限制高度，减少内存
         )
 
-    # 数据下载
+    # 数据下载（轻量化）
     st.subheader("💾 数据下载")
     if not company_df.empty:
         col1, col2 = st.columns(2)
@@ -528,23 +444,12 @@ if st.session_state.data_loaded:
 else:
     st.info("💡 数据加载中，请稍候...")
 
-# -------------------------- 侧边栏（报告下载） --------------------------
+# -------------------------- 侧边栏（移除报告下载，避免图片导出） --------------------------
 with st.sidebar:
-    st.header("📄 报告下载")
-    if st.button("生成分析报告", type="primary", use_container_width=True):
-        report_buffer = generate_report()
-        if report_buffer:
-            st.download_button(
-                "下载Word报告",
-                data=report_buffer,
-                file_name=f"{datetime.now().strftime('%Y%m%d')}_{selected_name}_转型分析报告.docx",
-                use_container_width=True
-            )
-
-    st.divider()
+    st.header("ℹ️ 平台说明")
     st.info(f"""
     📁 当前数据目录：
-    {BASE_DIR}
+    {BASE_DIR}/年报下载
 
     📄 词频数据文件：
     {WORDFREQ_FILE}
@@ -557,10 +462,11 @@ with st.sidebar:
     st.markdown("""
     📅 更新时间：2025年12月  
     🛠️ 技术栈：Streamlit + Plotly + Pandas  
-    ⚡ 核心功能：词频趋势 + 行业对比 + 报告含折线图
+    ⚡ 核心功能：词频趋势 + 行业对比 + 数据下载
     🎯 行业匹配：股票代码优先 + 企业名称兜底
+    🚀 优化说明：移除图片导出逻辑，适配云端部署
     """)
 
 # -------------------------- 页脚 --------------------------
 st.divider()
-st.markdown(f"© {datetime.now().year} 企业数字化转型分析平台")
+st.markdown(f"© {datetime.now().year} 企业数字化转型分析平台 | 适配Streamlit Cloud部署")
