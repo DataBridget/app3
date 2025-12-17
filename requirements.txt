@@ -1,7 +1,6 @@
-streamlit
+streamlit>=1.37.0
 pandas
 numpy
 plotly
-python-docx  # 若完全删除报告功能可移除
 openpyxl
-# 移除kaleido、matplotlib
+# 彻底移除kaleido、matplotlib、python-docx（无图片/报告导出）
